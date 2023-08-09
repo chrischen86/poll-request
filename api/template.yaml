@@ -1,0 +1,247 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  hackathon-api
+
+Transform:
+- AWS::Serverless-2016-10-31
+
+Globals:
+  Function:
+    Tracing: Active
+  Api:
+    TracingEnabled: true
+
+Resources:
+  HackathonApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "Hackathon Api Gateway ${AWS::StackName}"
+      StageName: Prod
+      Cors:
+        AllowMethods: "'POST, GET, PUT, DELETE, OPTIONS, PATCH'"
+        AllowHeaders: "'content-type'"
+        AllowOrigin: "'*'"
+        MaxAge: "'600'"
+  
+  ###########
+  # Lambdas #
+  ###########
+  createPollFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/create-poll.createPollHandler
+      Runtime: nodejs18.x
+      Architectures:
+      - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: Creates a poll
+      Role: !GetAtt "HackathonApiRole.Arn"
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HackathonTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HackathonApiGateway
+            Path: /poll
+            Method: POST
+  
+  getPollByIdFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/get-poll-byId.getByIdHandler
+      Runtime: nodejs18.x
+      Architectures:
+      - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: Returns a poll configuration by id
+      Role: !GetAtt "HackathonApiRole.Arn"
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HackathonTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HackathonApiGateway
+            Path: /poll/{id}
+            Method: GET
+  
+  postVoteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/post-vote.postVoteHandler
+      Runtime: nodejs18.x
+      Architectures:
+      - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: Submits vote to queue
+      Role: !GetAtt "HackathonApiRole.Arn"
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HackathonTable
+          QUEUE_URL: !Ref HackathonQueue
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HackathonApiGateway
+            Path: /vote
+            Method: POST
+
+  saveVoteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/save-vote.saveVoteHandler
+      Runtime: nodejs18.x
+      Architectures:
+      - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: Saves vote to DynamoDb
+      Role: !GetAtt "HackathonApiRole.Arn"
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HackathonTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HackathonApiGateway
+            Path: /vote/save
+            Method: POST
+
+  viewPollByIdFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/view-poll-byId.viewPollByIdHandler
+      Runtime: nodejs18.x
+      Architectures:
+      - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: View poll results by id
+      Role: !GetAtt "HackathonApiRole.Arn"
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HackathonTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HackathonApiGateway
+            Path: /view/{id}
+            Method: GET
+
+  #############################################
+  # SQS
+  #############################################
+  HackathonQueue:
+    Type: AWS::SQS::Queue
+    UpdateReplacePolicy: Delete
+    Properties:
+      QueueName: !Sub "Hackathon_Queue-${AWS::StackName}"
+      DelaySeconds: 0
+      VisibilityTimeout: 120
+
+  postVoteFunctionEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      Enabled: true
+      EventSourceArn: !GetAtt HackathonQueue.Arn
+      FunctionName: !GetAtt saveVoteFunction.Arn
+
+  #############################################
+  # DynamoDB
+  #############################################
+  HackathonTable:
+    Type: AWS::DynamoDB::Table
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties: 
+      AttributeDefinitions: 
+        - AttributeName: id
+          AttributeType: S
+      KeySchema: 
+        - AttributeName: id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+      Tags: 
+        - Key: "app"
+          Value: "hackathon"
+        - Key: "user"
+          Value: "chris"
+
+  #############################################
+  # IAM
+  #############################################
+  HackathonApiRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "HackathonApiRole-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: "Allow"
+          Principal:
+            Service: "lambda.amazonaws.com"
+          Action: "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: "Hackathon_Policy_HackathonTable"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "dynamodb:PutItem"
+                  - "dynamodb:DeleteItem"
+                  - "dynamodb:GetItem"
+                  - "dynamodb:Query"
+                  - "dynamodb:UpdateItem"
+                  - "dynamodb:Scan"
+                Resource: !GetAtt "HackathonTable.Arn"
+              - Effect: "Allow"
+                Action: 
+                  - "sqs:*"
+                Resource: !GetAtt "HackathonQueue.Arn"
+
+  ApplicationResourceGroup:
+    Type: AWS::ResourceGroups::Group
+    Properties:
+      Name:
+        Fn::Join:
+        - ''
+        - - ApplicationInsights-SAM-
+          - Ref: AWS::StackName
+      ResourceQuery:
+        Type: CLOUDFORMATION_STACK_1_0
+  ApplicationInsightsMonitoring:
+    Type: AWS::ApplicationInsights::Application
+    Properties:
+      ResourceGroupName:
+        Fn::Join:
+        - ''
+        - - ApplicationInsights-SAM-
+          - Ref: AWS::StackName
+      AutoConfigurationEnabled: 'true'
+    DependsOn: ApplicationResourceGroup
+
+Outputs:
+  HackathonApiGateway:
+    Description: API Gateway endpoint URL for Prod stage
+    Value: !Sub "https://${HackathonApiGateway}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  HackathonApiGatewayRestApiId:
+    Description: 'API Gateway ARN'
+    Value: !Ref HackathonApiGateway
+    Export:
+      Name: !Sub "HackathonApiGateway-RestApiId-${AWS::StackName}"
